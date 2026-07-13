@@ -196,6 +196,32 @@ aside > button.primary {
 .controls {
   display: grid;
   gap: 10px;
+  position: relative;
+}
+
+.copy-settings {
+  position: absolute;
+  top: 0;
+  right: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 2px 4px;
+  color: #8a7a5e;
+  opacity: 0.65;
+  transition: opacity 0.15s, color 0.15s;
+}
+
+.copy-settings:hover {
+  opacity: 1;
+  color: #5a4a2e;
+}
+
+.copy-settings.copied {
+  opacity: 1;
+  color: #4a8a4a;
 }
 
 .control {

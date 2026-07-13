@@ -115,6 +115,7 @@ function App() {
   const [error, setError] = useState("");
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [copiedSettings, setCopiedSettings] = useState(false);
   const workerRef = useRef(null);
   const runIdRef = useRef(0);
   const dragDepthRef = useRef(0);
@@ -401,6 +402,30 @@ function App() {
 
         <section className="controls">
           <h2>Search</h2>
+          <button
+            className={`copy-settings${copiedSettings ? " copied" : ""}`}
+            title="Copy settings as JSON for the Python CLI"
+            onClick={() => {
+              const scaffoldName = activeOutput.strength;
+              const payload = {
+                profile,
+                scaffold: scaffoldName,
+                paragraph_radius: settings.paragraphRadius,
+                frontier_growth: settings.frontierGrowth,
+                min_match_score: settings.minMatchScore,
+                min_shared_content: 1,
+                min_tokens: settings.minTokens,
+                max_candidates_per_token: settings.maxCandidatesPerToken,
+                pattern_min_score: settings.patternMinScore,
+              };
+              navigator.clipboard.writeText(JSON.stringify(payload, null, 2)).then(() => {
+                setCopiedSettings(true);
+                setTimeout(() => setCopiedSettings(false), 1500);
+              });
+            }}
+          >
+            {copiedSettings ? "\u2713" : "\u2398"}
+          </button>
           <Control
             label="Radius"
             value={settings.paragraphRadius}

@@ -510,36 +510,35 @@ def repeated_phrases(rows: list[dict], *, min_count: int = 4, max_items: int = 3
     ]
 
 
-def gapped_template_rows(
+def _wildcard_sets(length: int) -> list[tuple[int, ...]]:
+    internal = range(1, length)
+    max_wildcards = min(3, max(1, length - 4))
+    out: list[tuple[int, ...]] = []
+    for wildcard_count in range(1, max_wildcards + 1):
+        combo: list[int] = []
+
+        def choose(start: int) -> None:
+            if len(combo) == wildcard_count:
+                out.append(tuple(combo))
+                return
+            for pos in range(start, length):
+                combo.append(pos)
+                choose(pos + 1)
+                combo.pop()
+
+        choose(1)
+    return out
+
+
+def scan_templates(
     fragments: list[Fragment],
+    templates: dict[tuple[str, ...], dict],
     *,
-    min_count: int = 4,
-    max_items: int = 40,
-) -> list[dict]:
-    templates: dict[tuple[str, ...], dict] = {}
-
-    def wildcard_sets(length: int) -> list[tuple[int, ...]]:
-        internal = range(1, length)
-        max_wildcards = min(3, max(1, length - 4))
-        out: list[tuple[int, ...]] = []
-        for wildcard_count in range(1, max_wildcards + 1):
-            # Avoid itertools import churn in the hot path by using a tiny local recursive combiner.
-            combo: list[int] = []
-
-            def choose(start: int) -> None:
-                if len(combo) == wildcard_count:
-                    out.append(tuple(combo))
-                    return
-                for pos in range(start, length):
-                    combo.append(pos)
-                    choose(pos + 1)
-                    combo.pop()
-
-            choose(1)
-        return out
-
-    wildcard_cache = {length: wildcard_sets(length) for length in range(5, 10)}
-
+    hot_tokens: set[str] | None = None,
+) -> None:
+    wildcard_cache = {length: _wildcard_sets(length) for length in range(5, 10)}
+    use_filter = hot_tokens is not None and len(hot_tokens) > 0
+    prune_counter = 0
     for frag in fragments:
         tokens = frag.tokens
         for length in range(5, 10):
@@ -547,6 +546,9 @@ def gapped_template_rows(
                 continue
             for start in range(0, len(tokens) - length + 1):
                 window = tokens[start : start + length]
+                if use_filter:
+                    if not any(tok in hot_tokens for tok in window):
+                        continue
                 for wildcard_positions in wildcard_cache[length]:
                     fixed = [tok if idx not in wildcard_positions else "_" for idx, tok in enumerate(window)]
                     if len(set(tok for tok in fixed if tok != "_")) < 3:
@@ -580,7 +582,31 @@ def gapped_template_rows(
                         example = " ".join(window)
                         if example not in row["examples"]:
                             row["examples"].append(example)
+        prune_counter += 1
+        if prune_counter >= 500:
+            prune_counter = 0
+            stale = [key for key, row in templates.items() if row["count"] < 2]
+            for key in stale:
+                del templates[key]
 
+
+def extract_hot_tokens(templates: dict[tuple[str, ...], dict], *, min_template_count: int = 2) -> set[str]:
+    token_freq: Counter[str] = Counter()
+    for row in templates.values():
+        if row["count"] < min_template_count:
+            continue
+        for token in row["template"]:
+            if token != "_":
+                token_freq[token] += 1
+    return {token for token, count in token_freq.items() if count >= 2}
+
+
+def rank_and_dedup_templates(
+    templates: dict[tuple[str, ...], dict],
+    *,
+    min_count: int = 4,
+    max_items: int = 40,
+) -> list[dict]:
     rows: list[dict] = []
     for row in templates.values():
         if row["count"] < min_count:
@@ -625,6 +651,17 @@ def gapped_template_rows(
         if len(selected) >= max_items:
             break
     return selected
+
+
+def gapped_template_rows(
+    fragments: list[Fragment],
+    *,
+    min_count: int = 4,
+    max_items: int = 40,
+) -> list[dict]:
+    templates: dict[tuple[str, ...], dict] = {}
+    scan_templates(fragments, templates)
+    return rank_and_dedup_templates(templates, min_count=min_count, max_items=max_items)
 
 
 def soft_template_text(positions: list[Counter[str]]) -> str:
@@ -791,6 +828,18 @@ def absorb_boundary_quotes(text: str, left: int, right: int) -> tuple[int, int]:
         left -= 1
     while right < len(text) and text[right] in quote_chars:
         right += 1
+    dq_removed = text[left:right]
+    dq_count = dq_removed.count('"') + dq_removed.count('\u201c') + dq_removed.count('\u201d')
+    if dq_count == 1:
+        dq_chars = '"\u201c\u201d'
+        if left < right and text[left] in dq_chars:
+            left += 1
+            while left < right and text[left] in ' \t':
+                left += 1
+        elif right > left and text[right - 1] in dq_chars:
+            right -= 1
+            while right > left and text[right - 1] in ' \t':
+                right -= 1
     return left, right
 
 
@@ -1212,6 +1261,303 @@ def frontier_growth_for_args(args: argparse.Namespace) -> int:
     return first_profile["frontier_growth"]
 
 
+def prepare_document_for_batch(text: str, *, min_tokens: int) -> dict:
+    frontmatter, _ = strip_frontmatter(text)
+    paragraphs = parse_paragraphs(text)
+    character_tokens = extract_character_tokens(frontmatter) | extract_speaker_tokens(text)
+    fragments = build_fragments(paragraphs, min_tokens=min_tokens, excluded_tokens=character_tokens)
+    return {
+        "paragraphs": paragraphs,
+        "fragments": fragments,
+        "original_words": word_count(text),
+    }
+
+
+def _get_rss_mb() -> float:
+    try:
+        import resource
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    except Exception:
+        return 0.0
+
+
+def _prune_templates(templates: dict[tuple[str, ...], dict], min_count: int = 2) -> None:
+    stale = [key for key, row in templates.items() if row["count"] < min_count]
+    for key in stale:
+        del templates[key]
+
+
+def build_batch_pattern_model(prepared_docs: list[dict]) -> dict | None:
+    import time
+
+    TRANCHE_TOKEN_BUDGET = 8000
+    MAX_RSS_MB = 2048
+
+    total_tokens = sum(len(f.tokens) for doc in prepared_docs for f in doc["fragments"])
+    total_tranches = max(1, (total_tokens + TRANCHE_TOKEN_BUDGET - 1) // TRANCHE_TOKEN_BUDGET)
+    print(f"  Total: {total_tokens} tokens across {len(prepared_docs)} docs -> {total_tranches} tranches (~{TRANCHE_TOKEN_BUDGET} tokens each)")
+
+    templates: dict[tuple[str, ...], dict] = {}
+    hot_tokens: set[str] | None = None
+    global_idx = 0
+
+    tranche: list[Fragment] = []
+    tranche_tokens = 0
+    tranche_num = 0
+    scaffold_start = time.time()
+
+    for doc_idx, doc in enumerate(prepared_docs):
+        doc_fragments = []
+        doc_tokens = 0
+        for frag in doc["fragments"]:
+            f = Fragment(
+                idx=global_idx,
+                section=frag.section,
+                para_index=frag.para_index,
+                start_line=frag.start_line,
+                end_line=frag.end_line,
+                text=frag.text,
+                source_text=frag.source_text,
+                source_start=frag.source_start,
+                source_end=frag.source_end,
+                starts_capitalized=frag.starts_capitalized,
+                tokens=frag.tokens,
+            )
+            doc_fragments.append(f)
+            doc_tokens += len(frag.tokens)
+            global_idx += 1
+
+        tranche.extend(doc_fragments)
+        tranche_tokens += doc_tokens
+
+        if tranche_tokens >= TRANCHE_TOKEN_BUDGET or doc_idx == len(prepared_docs) - 1:
+            tranche_num += 1
+            elapsed = time.time() - scaffold_start
+            if tranche_num > 1:
+                eta_sec = elapsed / (tranche_num - 1) * (total_tranches - tranche_num + 1)
+                eta_str = f", ETA {eta_sec:.0f}s" if eta_sec < 60 else f", ETA {eta_sec/60:.1f}m"
+            else:
+                eta_str = ""
+            print(f"  Tranche {tranche_num}/{total_tranches}: {len(tranche)} fragments, ~{tranche_tokens} tokens{eta_str}")
+            scan_templates(tranche, templates, hot_tokens=hot_tokens)
+            hot_tokens = extract_hot_tokens(templates)
+            _prune_templates(templates)
+            print(f"    After prune: {len(templates)} templates, RSS {_get_rss_mb():.0f}MB")
+
+            rss = _get_rss_mb()
+            if rss > MAX_RSS_MB:
+                raise SystemExit(
+                    f"Memory guard: RSS {rss:.0f}MB exceeds {MAX_RSS_MB}MB limit. "
+                    f"Aborting batch scaffold build to prevent system crash. "
+                    f"Consider reducing --max-candidates-per-token or processing fewer files."
+                )
+
+            tranche = []
+            tranche_tokens = 0
+
+    scaffold_elapsed = time.time() - scaffold_start
+    print(f"  Scaffold build done in {scaffold_elapsed:.1f}s")
+    template_rows = rank_and_dedup_templates(templates)
+    model = pattern_model_from_template(template_rows[0] if template_rows else None)
+    return model, template_rows
+
+
+def build_split_batch_pattern_model(
+    prepared_docs: list[dict],
+    *,
+    splits: int = 2,
+    crossover: bool = False,
+    peak_k: int = 5,
+) -> dict | None:
+    import time
+
+    n = len(prepared_docs)
+    if splits < 2 or n < 2:
+        model, _rows = build_batch_pattern_model(prepared_docs)
+        return model
+
+    doc_tokens = [sum(len(f.tokens) for f in doc["fragments"]) for doc in prepared_docs]
+    total_tokens = sum(doc_tokens)
+
+    # Greedy balanced assignment: assign each doc to the group with fewest tokens
+    groups: list[list[int]] = [[] for _ in range(splits)]
+    group_tokens = [0] * splits
+    for i in range(n):
+        min_g = min(range(splits), key=lambda g: group_tokens[g])
+        groups[min_g].append(i)
+        group_tokens[min_g] += doc_tokens[i]
+
+    print(f"  Split mode: {splits} sub-batches, peak crossover top-{peak_k}, crossover={crossover}")
+    for g in range(splits):
+        print(f"    Sub-batch {g+1}: {len(groups[g])} files, ~{group_tokens[g]} tokens")
+
+    all_peak_rows: list[dict] = []
+    split_start = time.time()
+
+    for g in range(splits):
+        group_doc_indices = list(groups[g])
+        # Optional crossover: prepend last doc of previous group
+        if crossover and g > 0 and groups[g - 1]:
+            cross_idx = groups[g - 1][-1]
+            group_doc_indices = [cross_idx] + group_doc_indices
+
+        group_docs = [prepared_docs[i] for i in group_doc_indices]
+        print(f"\n  --- Sub-batch {g+1}/{splits}: {len(group_docs)} files ---")
+        model, template_rows = build_batch_pattern_model(group_docs)
+
+        if template_rows:
+            top_rows = template_rows[:peak_k]
+            for row in top_rows:
+                all_peak_rows.append(row)
+            print(f"  Peaks from sub-batch {g+1}: {len(top_rows)} templates (top: {top_rows[0]['soft_text']}, count={top_rows[0]['count']})")
+        else:
+            print(f"  No templates from sub-batch {g+1}")
+
+    split_elapsed = time.time() - split_start
+    print(f"\n  Split scaffold build done in {split_elapsed:.1f}s")
+
+    if not all_peak_rows:
+        return None
+
+    # Pick the best pattern model by source_count across all peaks
+    best_row = max(all_peak_rows, key=lambda r: r["count"])
+    best_model = pattern_model_from_template(best_row)
+    print(f"  Best peak: {best_model['soft_text']} (source count: {best_model['source_count']}) from {len(all_peak_rows)} candidates")
+    return best_model
+
+
+def merged_spans(spans: list[dict]) -> list[dict]:
+    sorted_spans = sorted(spans, key=lambda s: (s["left"], s["right"]))
+    merged: list[dict] = []
+    for span in sorted_spans:
+        if not merged or span["left"] > merged[-1]["right"]:
+            merged.append(dict(span))
+            continue
+        merged[-1]["right"] = max(merged[-1]["right"], span["right"])
+        if span.get("severity", 0) > merged[-1].get("severity", 0):
+            merged[-1]["severity"] = span["severity"]
+            merged[-1]["method"] = span["method"]
+    return merged
+
+
+def apply_spans(text: str, spans: list[dict]) -> str:
+    refloored = text
+    for span in sorted(spans, key=lambda s: s["left"], reverse=True):
+        refloored = refloored[: span["left"]] + " @ " + refloored[span["right"] :]
+    return cleanup_text(normalize_edit_markers(refloored))
+
+
+def prefix_ablation_frontmatter(text: str, metadata: dict) -> str:
+    import json
+    payload = {
+        "tool": "ablation-lab.v1",
+        "mode": "generative-prior ablation",
+        "file": metadata["file"],
+        "input_sha256": metadata["hash"],
+        "processed_at": metadata["processed_at"],
+        "local_pass": metadata["local_pass"],
+        "scaffold_pass": metadata["scaffold_pass"],
+        "words": metadata["words"],
+        "removals": metadata["removals"],
+    }
+    return f"---\nablation_lab: {json.dumps(payload)}\n---\n\n{text}"
+
+
+def analyze_text(
+    text: str,
+    *,
+    min_tokens: int,
+    paragraph_radius: int,
+    frontier_growth: int,
+    min_match_score: float,
+    min_shared_content: int,
+    max_candidates_per_token: int,
+    pattern_min_score: float,
+    profile_name: str,
+    scaffold_policy: str = "off",
+    pattern_model: dict | None = None,
+) -> dict:
+    frontmatter, _ = strip_frontmatter(text)
+    paragraphs = parse_paragraphs(text)
+    character_tokens = extract_character_tokens(frontmatter) | extract_speaker_tokens(text)
+    fragments = build_fragments(paragraphs, min_tokens=min_tokens, excluded_tokens=character_tokens)
+    original_words = word_count(text)
+
+    rows = score_fragments(
+        fragments,
+        paragraph_radius=paragraph_radius,
+        frontier_growth=frontier_growth,
+        min_match_score=min_match_score,
+        min_shared_content=min_shared_content,
+        max_candidates_per_token=max_candidates_per_token,
+        excluded_tokens=character_tokens,
+    )
+
+    profile = REFLOOR_PROFILES[profile_name]
+    local_selected = selected_for_profile(rows, len(fragments), profile)
+
+    template_rows = gapped_template_rows(fragments, max_items=40)
+    effective_model = pattern_model if pattern_model is not None else pattern_model_from_template(template_rows[0] if template_rows else None)
+
+    scaffold_selected: list[dict] = []
+    if scaffold_policy != "off" and effective_model:
+        candidates = pattern_candidates(fragments, effective_model, min_score=pattern_min_score)
+        scaffold_selected = select_pattern_candidates(candidates, scaffold_policy)
+
+    local_spans: list[dict] = []
+    for row in local_selected:
+        frag = row["fragment"]
+        match = re.search(re.escape(frag.text), text)
+        if not match:
+            continue
+        left, right = removal_span(text, Fragment(
+            idx=frag.idx, section=frag.section, para_index=frag.para_index,
+            start_line=frag.start_line, end_line=frag.end_line, text=frag.text,
+            source_text=text, source_start=match.start(), source_end=match.end(),
+            starts_capitalized=frag.starts_capitalized, tokens=frag.tokens,
+        ))
+        local_spans.append({"left": left, "right": right, "method": "local", "severity": row["badness"]})
+
+    scaffold_spans: list[dict] = []
+    for candidate in scaffold_selected:
+        frag = candidate["fragment"]
+        match = re.search(re.escape(frag.text), text)
+        if not match:
+            continue
+        left, right = removal_span(text, Fragment(
+            idx=frag.idx, section=frag.section, para_index=frag.para_index,
+            start_line=frag.start_line, end_line=frag.end_line, text=frag.text,
+            source_text=text, source_start=match.start(), source_end=match.end(),
+            starts_capitalized=frag.starts_capitalized, tokens=frag.tokens,
+        ))
+        scaffold_spans.append({"left": left, "right": right, "method": "scaffold", "severity": candidate["score"]})
+
+    spans = merged_spans(local_spans + scaffold_spans)
+    refloored = apply_spans(text, spans)
+    kept_words = word_count(refloored)
+
+    local_count = sum(1 for s in spans if s["method"] == "local")
+    scaffold_count = sum(1 for s in spans if s["method"] == "scaffold")
+
+    return {
+        "refloored": refloored,
+        "spans": spans,
+        "fragments": fragments,
+        "rows": rows,
+        "template_rows": template_rows,
+        "pattern_model": effective_model,
+        "metrics": {
+            "original_words": original_words,
+            "kept_words": kept_words,
+            "stripped_words": max(0, original_words - kept_words),
+            "kept_pct": kept_words / max(1, original_words) * 100,
+            "removed_fragments": len(spans),
+            "local_count": local_count,
+            "scaffold_count": scaffold_count,
+        },
+    }
+
+
 def analyze_book(path: Path, args: argparse.Namespace, out_dir: Path | None = None) -> dict:
     text = path.read_text(encoding="utf-8")
     frontmatter, _ = strip_frontmatter(text)
@@ -1313,6 +1659,222 @@ def write_metrics_summary(results: list[dict], out_dir: Path) -> tuple[Path, Pat
     return csv_path, md_path
 
 
+SCAFFOLD_POLICY_MAP = {
+    "off": "off",
+    "light": "ceiling",
+    "medium": "floor2",
+    "hard": "floor1",
+}
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    h.update(path.read_bytes())
+    return h.hexdigest()
+
+
+def run_batch(args: argparse.Namespace) -> None:
+    from datetime import datetime, timezone
+
+    batch_dir = Path(args.batch)
+    if not batch_dir.is_dir():
+        raise SystemExit(f"Batch directory not found: {batch_dir}")
+    out_dir = Path(args.write_refloors)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    paths = sorted(batch_dir.glob("*.md"))
+    if not paths:
+        raise SystemExit(f"No .md files found in {batch_dir}")
+
+    print(f"Batch mode: {len(paths)} files from {batch_dir}")
+    print()
+
+    print("Indexing batch prior...")
+    prepared_docs = []
+    for i, path in enumerate(paths, 1):
+        text = path.read_text(encoding="utf-8")
+        prepared = prepare_document_for_batch(text, min_tokens=args.min_tokens)
+        prepared["path"] = path
+        prepared["text"] = text
+        prepared_docs.append(prepared)
+        print(f"  [{i}/{len(paths)}] {path.name}: {len(prepared['fragments'])} fragments")
+
+    print()
+    print("Building shared scaffold prior...")
+    if args.batch_split and args.batch_split > 1:
+        pattern_model = build_split_batch_pattern_model(prepared_docs, splits=args.batch_split, crossover=args.batch_crossover)
+    else:
+        pattern_model, _rows = build_batch_pattern_model(prepared_docs)
+    if pattern_model:
+        print(f"  Model: {pattern_model['soft_text']} (source count: {pattern_model['source_count']})")
+    else:
+        print("  No scaffold templates met the threshold.")
+    print()
+
+    scaffold_policy = SCAFFOLD_POLICY_MAP.get(args.scaffold, "off")
+    profile_name = args.profile_names[0]
+    growth = frontier_growth_for_args(args)
+
+    results: list[dict] = []
+    import time as _time
+    analyze_start = _time.time()
+    for i, path in enumerate(paths, 1):
+        if i > 1:
+            elapsed = _time.time() - analyze_start
+            eta_sec = elapsed / (i - 1) * (len(paths) - i + 1)
+            eta_str = f" (ETA {eta_sec:.0f}s)" if eta_sec < 60 else f" (ETA {eta_sec/60:.1f}m)"
+        else:
+            eta_str = ""
+        print(f"[{i}/{len(paths)}] {path.name}{eta_str}")
+        prepared = prepared_docs[i - 1]
+        result = analyze_text(
+            prepared["text"],
+            min_tokens=args.min_tokens,
+            paragraph_radius=args.paragraph_radius,
+            frontier_growth=growth,
+            min_match_score=args.min_match_score,
+            min_shared_content=args.min_shared_content,
+            max_candidates_per_token=args.max_candidates_per_token,
+            pattern_min_score=args.pattern_min_score,
+            profile_name=profile_name,
+            scaffold_policy=scaffold_policy,
+            pattern_model=pattern_model,
+        )
+        file_hash = _sha256_file(path)
+        processed_at = datetime.now(timezone.utc).isoformat()
+        refloored = prefix_ablation_frontmatter(result["refloored"], {
+            "file": path.name,
+            "hash": file_hash,
+            "processed_at": processed_at,
+            "local_pass": profile_name,
+            "scaffold_pass": args.scaffold,
+            "words": {
+                "original": result["metrics"]["original_words"],
+                "kept": result["metrics"]["kept_words"],
+                "stripped": result["metrics"]["stripped_words"],
+            },
+            "removals": {
+                "local": result["metrics"]["local_count"],
+                "scaffold": result["metrics"]["scaffold_count"],
+                "total": result["metrics"]["removed_fragments"],
+            },
+        })
+        out_path = out_dir / f"{path.stem}.{profile_name}.scaffold-{args.scaffold}.md"
+        out_path.write_text(refloored, encoding="utf-8")
+        m = result["metrics"]
+        print(f"  -> {out_path.name}: kept {m['kept_words']}/{m['original_words']} words, "
+              f"removed {m['removed_fragments']} fragments (local={m['local_count']}, scaffold={m['scaffold_count']})")
+        results.append({
+            "path": path,
+            "out_path": out_path,
+            "metrics": m,
+        })
+
+    csv_path = out_dir / "batch-metrics.csv"
+    md_path = out_dir / "batch-metrics.md"
+    csv_lines = ["file,original_words,kept_words,stripped_words,kept_pct,removed_fragments,local,scaffold"]
+    md_lines = [
+        "# Batch Metrics",
+        "",
+        "| File | Original | Kept | Stripped | Kept % | Removed | Local | Scaffold |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for r in sorted(results, key=lambda item: item["path"].name):
+        m = r["metrics"]
+        csv_lines.append(f"{r['path'].name},{m['original_words']},{m['kept_words']},{m['stripped_words']},{m['kept_pct']:.2f},{m['removed_fragments']},{m['local_count']},{m['scaffold_count']}")
+        md_lines.append(f"| `{r['path'].name}` | {m['original_words']} | {m['kept_words']} | {m['stripped_words']} | {m['kept_pct']:.2f} | {m['removed_fragments']} | {m['local_count']} | {m['scaffold_count']} |")
+    csv_path.write_text("\n".join(csv_lines) + "\n", encoding="utf-8")
+    md_path.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+
+    total_original = sum(r["metrics"]["original_words"] for r in results)
+    total_kept = sum(r["metrics"]["kept_words"] for r in results)
+    total_stripped = sum(r["metrics"]["stripped_words"] for r in results)
+    total_removed = sum(r["metrics"]["removed_fragments"] for r in results)
+    total_local = sum(r["metrics"]["local_count"] for r in results)
+    total_scaffold = sum(r["metrics"]["scaffold_count"] for r in results)
+    overall_pct = total_kept / max(1, total_original) * 100
+
+    print()
+    print("=" * 60)
+    print("Batch Summary")
+    print("=" * 60)
+    print()
+    print(f"  Files processed:      {len(results)}")
+    print(f"  Words (original):     {total_original}")
+    print(f"  Words (kept):         {total_kept}")
+    print(f"  Words (stripped):     {total_stripped}  ({100 - overall_pct:.1f}% of original)")
+    print(f"  Words (kept %):       {overall_pct:.1f}%")
+    print(f"  Fragments removed:    {total_removed}  (local: {total_local}, scaffold: {total_scaffold})")
+    if pattern_model:
+        print(f"  Scaffold model:       {pattern_model['soft_text']}  ({pattern_model['source_count']} source hits)")
+    else:
+        print(f"  Scaffold model:       none (no templates met threshold)")
+    print(f"  Profile:              {profile_name}")
+    print(f"  Scaffold pass:        {args.scaffold}")
+    print()
+    print("  Per-file results:")
+    for r in sorted(results, key=lambda item: item["path"].name):
+        m = r["metrics"]
+        print(f"    {r['path'].name}: kept {m['kept_words']}/{m['original_words']} words "
+              f"({m['kept_pct']:.1f}%), removed {m['removed_fragments']} "
+              f"(local={m['local_count']}, scaffold={m['scaffold_count']})")
+    print()
+    print(f"  Output directory:     {out_dir}")
+    print(f"  Metrics CSV:          {csv_path}")
+    print(f"  Metrics Markdown:     {md_path}")
+    print()
+    print("-" * 60)
+    print("What these numbers mean:")
+    print()
+    print("  Words (original)   Total word count across all input files.")
+    print("  Words (kept)       Words remaining after ablation. This is the")
+    print("                     usable output text.")
+    print("  Words (stripped)   Words removed — they were part of fragments")
+    print("                     identified as redundant or matching a scaffold")
+    print("                     pattern. Not deleted from the source files;")
+    print("                     only absent from the output.")
+    print("  Kept %             Percentage of original text preserved.")
+    print("                     85-95% is typical for moderate cleanup.")
+    print("                     Below 80% suggests aggressive settings —")
+    print("                     review the @ markers in the output to confirm")
+    print("                     the cuts are warranted.")
+    print("  Fragments removed  Number of text fragments excised. Each was a")
+    print("                     clause or sentence segment flagged as repetitive")
+    print("                     or matching a scaffold pattern.")
+    print("  local              Removals from the local duplicate-fragment pass.")
+    print("                     These are near-duplicate text segments found by")
+    print("                     comparing fragments within a paragraph radius.")
+    print("  scaffold           Removals from the scaffold pattern pass. These")
+    print("                     match a shared structural template (e.g. \"the X")
+    print("                     was the Y that Z\") built from the corpus prior.")
+    print("                     A shared prior means the same pattern model was")
+    print("                     used across all files for consistency.")
+    print("  Scaffold model     The top-ranked structural pattern detected")
+    print("                     across the corpus, shown as a soft template with")
+    print("                     the most common token at each position. Source")
+    print("                     hits = how many fragments matched it before")
+    print("                     deduplication.")
+    print()
+    print("Next steps:")
+    print()
+    print("  1. Review the @ markers in the output files. Each @ marks where a")
+    print("     fragment was removed. A follow-on pass with a lite LLM can heal")
+    print("     these break points — replacing @ with a clean connective or")
+    print("     removing it. This is cheap because the tool already identified")
+    print("     what to cut; the LLM only smooths the seam.")
+    print("  2. If too much was removed, try a lower profile (med -> low) or a")
+    print("     lighter scaffold pass (hard -> medium or light). Re-run and")
+    print("     compare the kept %.")
+    print("  3. If too little was removed, try a higher profile (med -> high) or")
+    print("     a stronger scaffold pass. The diff view in the web UI shows")
+    print("     exactly what each setting change does.")
+    print("  4. Don't mine @-marked chunks for value. Diffing can recover the")
+    print("     removed text, but if the tool flagged it as redundant, it almost")
+    print("     certainly is. Trust the cut and heal the break.")
+    print()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Find local fragment repetition hotspots in a markdown document")
     parser.add_argument("--book", help="Document slug under the content directory")
@@ -1330,8 +1892,20 @@ def main() -> None:
     parser.add_argument("--write-refloors", help="Directory to write selected refloored markdown outputs")
     parser.add_argument("--write-pattern-bakeoff", help="Directory to write soft-pattern bakeoff outputs")
     parser.add_argument("--pattern-min-score", type=float, default=0.52, help="Minimum soft-pattern probability score for bakeoff candidates")
+    parser.add_argument("--batch", help="Directory of .md files to process in batch mode with a shared scaffold prior")
+    parser.add_argument("--scaffold", default="off", choices=["off", "light", "medium", "hard"], help="Scaffold pass strength for batch mode (off/light/medium/hard)")
+    parser.add_argument("--batch-split", type=int, default=0, help="Split batch into N independent sub-batches with peak crossover. 0 = single batch (default). Speeds up large collections by keeping template dicts small per group.")
+    parser.add_argument("--batch-crossover", action="store_true", help="When using --batch-split, include the last file of each sub-batch in the next one for shared context.")
     args = parser.parse_args()
     args.profile_names = parse_profile_names(args.profiles)
+
+    if args.batch:
+        if args.book or args.file or args.all:
+            raise SystemExit("--batch cannot be combined with --book, --file, or --all")
+        if not args.write_refloors:
+            raise SystemExit("--batch requires --write-refloors")
+        run_batch(args)
+        return
 
     if args.all:
         if args.book or args.file:

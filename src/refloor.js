@@ -596,6 +596,18 @@ function removalSpan(text, frag) {
   while (right < text.length && /[ \t]/.test(text[right])) right += 1;
   while (left > 0 && /["'“”‘’]/.test(text[left - 1])) left -= 1;
   while (right < text.length && /["'“”‘’]/.test(text[right])) right += 1;
+  const dqRemoved = text.slice(left, right);
+  const dqCount = (dqRemoved.match(/["\u201c\u201d]/g) || []).length;
+  if (dqCount === 1) {
+    const dq = /["\u201c\u201d]/;
+    if (left < frag.sourceStart && dq.test(text[left])) {
+      left += 1;
+      while (left < frag.sourceStart && /[ \t]/.test(text[left])) left += 1;
+    } else if (right > frag.sourceEnd && dq.test(text[right - 1])) {
+      right -= 1;
+      while (right > frag.sourceEnd && /[ \t]/.test(text[right - 1])) right -= 1;
+    }
+  }
   return { left, right };
 }
 

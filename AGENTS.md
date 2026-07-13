@@ -12,7 +12,7 @@ The tool operates on markdown documents (books, articles, any prose) and uses a 
 
 The project contains two parallel implementations of the same algorithm:
 
-1. **Python script** (`scripts/find-repetition-hotspots.py`) — CLI tool for batch processing, corpus-wide analysis, and report generation. Uses NLTK's `TreebankWordTokenizer` for tokenisation and `difflib.SequenceMatcher` for sequence similarity.
+1. **Python script** (`scripts/find-repetition-hotspots.py`) — CLI tool for single-file analysis, corpus-wide processing (`--all`), and batch mode (`--batch`) with a shared scaffold prior. Uses NLTK's `TreebankWordTokenizer` for tokenisation and `difflib.SequenceMatcher` for sequence similarity. Batch mode mirrors the JS web app: prepares all documents, builds a shared pattern model across the corpus, then processes each file with combined local + scaffold passes, writing outputs with ablation frontmatter and a metrics summary.
 
 2. **JavaScript web app** (`src/`) — Vite + React SPA running entirely in the browser via a Web Worker. Accepts file uploads, processes client-side, shows inline diffs, and exports cleaned markdown. No server, no logging, no telemetry.
 
@@ -148,8 +148,9 @@ When a fragment is removed, the system heals surrounding punctuation responsibly
 3. Remove the separator from one side: if both sides have separators, remove the left one; if only one side has one, remove that one
 4. Speaker colons (`Name:`) are protected — the colon is not removed if it's a dialogue label
 5. Absorb surrounding quotes (`" ' " " ' '`) into the removal span
-6. **Newlines are never collapsed or stripped** — this prevents body paragraphs from being smashed into headings
-7. After all spans are applied, a cleanup pass normalises multiple spaces, ensures headings have blank lines on both sides, and consolidates adjacent edit markers
+6. **Single double-quote preservation** — if the absorbed span contains exactly one double-quote (straight `"` or curly `"` `"`), the span is pulled back to exclude that quote. This prevents removing a speech mark that belongs to the surrounding dialogue rather than the fragment. Single quotes are not protected (to avoid catching apostrophes).
+7. **Newlines are never collapsed or stripped** — this prevents body paragraphs from being smashed into headings
+8. After all spans are applied, a cleanup pass normalises multiple spaces, ensures headings have blank lines on both sides, and consolidates adjacent edit markers
 
 This is integrated into the span calculation, not applied as a separate post-process. The user explicitly required that "removing it responsibly should be a fundamental part of how it keeps track of the process."
 

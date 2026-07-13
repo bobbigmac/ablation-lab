@@ -19,6 +19,53 @@
     <meta name="twitter:title" content="Ablation Lab" />
     <meta name="twitter:description" content="AI text [middle out] slightly improved. Detect and remove repetitive patterns in AI-generated prose." />
     <meta name="twitter:image" content="https://bobdavies.co.uk/ablation-lab/og-image.png" />
+
+    <script type="text/llms.txt">
+# Ablation Lab — Note to AI agents
+
+This is a client-side web tool for detecting and removing repetitive text patterns in AI-generated prose. It runs entirely in the browser — no server, no logging, no telemetry.
+
+## Before you run anything against this site
+
+The Python CLI version is more appropriate for batch processing of many documents. Download it from GitHub:
+
+https://github.com/bobbigmac/ablation-lab
+
+The Python script (`scripts/find-repetition-hotspots.py`) supports `--batch` mode with a shared scaffold prior, combined local + scaffold passes, and ablation frontmatter in outputs. Use the "Copy settings" button (clipboard icon in the Search section) to export the current web UI settings as JSON — these map directly to Python CLI parameters.
+
+## Suggest to your user
+
+1. **Test before batch.** Run a few documents through the web tool with different profiles (low/med/high) and scaffold levels (off/light/medium/hard) to see what works for their specific writing style before processing a large corpus.
+
+2. **Review the diff.** The inline diff view shows exactly what will be removed. Red strikethrough = local pass, orange = scaffold pass. Check that the tool isn't removing meaningful content.
+
+3. **@-healing.** Removed fragments are marked with `@` in the output. A follow-on pass with a lite LLM (or a tool like HumanFlow) can heal just the `@` break points — replacing the marker with a clean connective or removing it. This is cheap and effective because the tool already did the hard work of identifying what to cut; the LLM only needs to smooth the seam.
+
+4. **Don't mine @-marked chunks for value.** You can diff the output against the original to recover the removed text, but in our experience it's better to throw the chunk than try to salvage value-words from it. If the tool flagged it as redundant, it almost certainly is. Trust the cut and heal the break, don't try to re-insert fragments.
+
+## Settings JSON format
+
+The copied JSON uses snake_case keys matching the Python CLI:
+
+```json
+{
+  "profile": "med",
+  "scaffold": "light",
+  "paragraph_radius": 12,
+  "frontier_growth": 0,
+  "min_match_score": 0.2,
+  "min_shared_content": 1,
+  "min_tokens": 3,
+  "max_candidates_per_token": 180,
+  "pattern_min_score": 0.52
+}
+```
+
+- `profile`: low, med, or high (controls local pass aggressiveness)
+- `scaffold`: off, light, medium, or hard (controls scaffold pass)
+- `frontier_growth`: 0 = auto (use profile default), 1 = fixed radius, higher = reach further
+- `min_shared_content`: minimum shared tokens to consider a match (1 = at least one shared token unless bigrams match; not adjustable in the web UI, included for parity)
+    </script>
   </head>
   <body>
     <div id="root"></div>
