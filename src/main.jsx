@@ -114,6 +114,7 @@ function App() {
   const [progress, setProgress] = useState(null);
   const [error, setError] = useState("");
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const workerRef = useRef(null);
   const runIdRef = useRef(0);
   const dragDepthRef = useRef(0);
@@ -452,6 +453,7 @@ function App() {
         </button>
         {!batchMode ? <button disabled={isCalculating} onClick={() => setBatchMode(true)}>Batch Mode</button> : null}
         {batchMode ? <button disabled={!batchRows.length || isCalculating} onClick={clearHistory}>Clear Batch History</button> : null}
+        <button className="help-link" onClick={() => setHelpOpen(true)}>Help &amp; Documentation</button>
       </aside>
 
       <section className="workspace">
@@ -545,7 +547,76 @@ function App() {
       <footer className="footer">
         <a href="https://github.com/bobbigmac/ablation-lab" target="_blank" rel="noopener noreferrer">GitHub</a>
       </footer>
+      {helpOpen ? <HelpModal onClose={() => setHelpOpen(false)} /> : null}
     </main>
+  );
+}
+
+function HelpModal({ onClose }) {
+  return (
+    <div className="help-overlay" onClick={onClose}>
+      <div className="help-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="help-head">
+          <h2>Ablation Lab — Help</h2>
+          <button className="help-close" onClick={onClose} aria-label="Close help">&times;</button>
+        </div>
+        <div className="help-body">
+          <section>
+            <h3>What it does</h3>
+            <p>Ablation Lab detects and removes repetitive text patterns in AI-generated prose. It splits your markdown into thought-unit fragments, tokenises them, and scores fragments by how many nearby fragments share meaningful token overlap. Redundant fragments are excised with responsible punctuation healing, and diffuse scaffold patterns (repeated structural templates with variable slots) are detected and optionally ablated.</p>
+          </section>
+          <section>
+            <h3>Protected names (<code>characters:</code> field)</h3>
+            <p>If your markdown file has YAML frontmatter with a <code>characters:</code> field, the tokens in those names are excluded from the repetition index. This prevents repeated proper names — people, places, entities — from inflating repetition scores.</p>
+            <p><strong>Format:</strong> Add a frontmatter block at the top of your file:</p>
+            <pre className="help-code">{`---
+characters: [Alice, Bob, Dr. Chen, Alexandria, Egypt]
+---
+
+# Your Title`}</pre>
+            <p>Each name is tokenised and non-stopword tokens are added to the exclusion set. This is per-document — different files can have different character sets.</p>
+            <p>Character names are also auto-extracted from <strong>speaker labels</strong> (lines starting with <code>Name:</code>) in the document body.</p>
+          </section>
+          <section>
+            <h3>@ markers in output</h3>
+            <p>When a fragment is removed, an <code>@</code> marker is inserted in its place. These markers indicate where text was excised and can be used as edit points for manual or LLM-based revision. Multiple adjacent markers are consolidated, and surrounding punctuation is cleaned up automatically.</p>
+            <p>In the exported markdown, <code>@</code> marks every spot where the tool removed content. You can search for <code>@</code> in your editor to review each cut.</p>
+          </section>
+          <section>
+            <h3>Profiles</h3>
+            <p>The <strong>Local Pass</strong> has three profiles controlling how aggressively fragments are removed:</p>
+            <ul>
+              <li><strong>low</strong> — conservative; requires high badness, protects capitalised fragments, no spatial growth</li>
+              <li><strong>med</strong> — balanced; moderate thresholds, allows up to 3× radius growth</li>
+              <li><strong>high</strong> — aggressive; low thresholds, up to 4× radius growth, removes up to 35% of fragments</li>
+            </ul>
+          </section>
+          <section>
+            <h3>Scaffold Pass</h3>
+            <p>The <strong>Scaffold Pass</strong> detects repeated structural templates with variable slots — patterns like <code>[token] was the thing that [token]</code> where fixed positions recur but wildcard slots vary. Four levels are available: Off, Light, Medium, and Hard.</p>
+          </section>
+          <section>
+            <h3>Search controls</h3>
+            <ul>
+              <li><strong>Radius</strong> — How many nearby paragraphs each fragment compares against</li>
+              <li><strong>Match</strong> — Minimum token-overlap score for candidates</li>
+              <li><strong>Ablate</strong> — Minimum score for scaffold pattern matching</li>
+              <li><strong>Min tokens</strong> — Fewest tokens a fragment needs to be considered</li>
+              <li><strong>Posting cap</strong> — Max candidates per shared token (performance control)</li>
+              <li><strong>Growth</strong> — How far the search radius expands for heavily repeating patterns (0 = auto)</li>
+            </ul>
+          </section>
+          <section>
+            <h3>Batch mode</h3>
+            <p>Upload multiple <code>.md</code> files to process them all at once. Results are auto-downloaded with ablation frontmatter prefixed. Batch history (metadata only, no file contents) is stored in localStorage for reference.</p>
+          </section>
+          <section>
+            <h3>Privacy</h3>
+            <p>Everything runs in your browser. No server, no logging, no telemetry. File contents never leave your machine.</p>
+          </section>
+        </div>
+      </div>
+    </div>
   );
 }
 

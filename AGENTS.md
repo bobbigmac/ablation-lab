@@ -22,7 +22,7 @@ Both implementations share identical algorithm logic, profile parameters, and sc
 
 - `src/refloor.js` — Core algorithm: parsing, tokenising, fragment scoring, pattern detection, span removal, punctuation healing. Exports `analyze()`, `prepareDocumentForBatch()`, `buildBatchPatternModel()`, `PROFILES`, `DEFAULT_SETTINGS`.
 - `src/refloor.worker.js` — Web Worker wrapper that calls `analyze()` off the main thread. Handles both single-file and batch modes.
-- `src/main.jsx` — React UI: file upload (click + drag-and-drop), parameter controls, inline diff rendering, diagnostics panel, batch workspace with per-file metrics and auto-download.
+- `src/main.jsx` — React UI: file upload (click + drag-and-drop), parameter controls, inline diff rendering, diagnostics panel, batch workspace with per-file metrics and auto-download, in-app help modal documenting protected names, @ markers, profiles, and controls.
 - `src/batch.js` — Batch utilities: SHA-256 hashing, job creation, localStorage history (metadata only, 250-row limit), ablation frontmatter prefixing, download trigger.
 - `src/styles.css` — Full styling, dark sidebar + light workspace, severity-coloured diff highlights.
 - `vite.config.js` — Vite config with `@vitejs/plugin-react` and configurable `base` path (defaults to `/ablation-lab/`).
@@ -259,6 +259,18 @@ The scoring phase is typically the most expensive, scaling with fragment count �
 The app is deployed to GitHub Pages via a workflow (`.github/workflows/deploy-pages.yml`) that builds with Vite and deploys the `dist/` directory. The Vite base path is configurable via `VITE_BASE_PATH` environment variable, defaulting to `/ablation-lab/`.
 
 Live URL: `bobdavies.co.uk/ablation-lab/`
+
+## In-app help
+
+The UI includes a help modal (opened via the "Help & Documentation" button in the sidebar) that documents:
+
+- **Protected names** — the `characters:` frontmatter field format, how tokens are extracted and excluded, and the speaker-label auto-extraction
+- **@ markers** — how removed fragments are marked in output, consolidation behaviour, and how to use them as edit points
+- **Profiles** — the three local pass profiles (low/med/high) and their thresholds
+- **Scaffold Pass** — the four ablation levels (Off/Light/Medium/Hard)
+- **Search controls** — what each parameter does (Radius, Match, Ablate, Min tokens, Posting cap, Growth)
+- **Batch mode** — multi-file processing, auto-download, localStorage history
+- **Privacy** — fully client-side, no server or telemetry
 
 ## License
 
