@@ -14,6 +14,7 @@ export const PROFILES = {
     maxUnique: 2,
     maxRemoveRatio: 0.08,
     allowCapitalized: false,
+    frontierGrowth: 1,
   },
   med: {
     minBadness: 1.8,
@@ -23,6 +24,7 @@ export const PROFILES = {
     maxUnique: 4,
     maxRemoveRatio: 0.18,
     allowCapitalized: true,
+    frontierGrowth: 3,
   },
   high: {
     minBadness: 1.0,
@@ -32,11 +34,13 @@ export const PROFILES = {
     maxUnique: 6,
     maxRemoveRatio: 0.35,
     allowCapitalized: true,
+    frontierGrowth: 4,
   },
 };
 
 export const DEFAULT_SETTINGS = {
   paragraphRadius: 12,
+  frontierGrowth: 0,
   minMatchScore: 0.2,
   minTokens: 3,
   maxCandidatesPerToken: 180,
@@ -244,7 +248,7 @@ function buildIndex(fragments) {
   return index;
 }
 
-function candidateIds(frag, fragments, index, tokens, settings) {
+function candidateIds(frag, fragments, index, tokens, settings, effectiveRadius) {
   const ids = new Set();
   for (const token of new Set(tokens)) {
     const posting = index.get(token) ?? [];
@@ -252,7 +256,7 @@ function candidateIds(frag, fragments, index, tokens, settings) {
     for (const idx of posting) {
       if (idx === frag.idx) continue;
       const other = fragments[idx];
-      if (Math.abs(other.paraIndex - frag.paraIndex) <= settings.paragraphRadius) ids.add(idx);
+      if (Math.abs(other.paraIndex - frag.paraIndex) <= effectiveRadius) ids.add(idx);
     }
   }
   return ids;
@@ -272,6 +276,7 @@ function scoreFragments(fragments, settings, report) {
   const index = buildIndex(fragments);
   const rows = [];
   let processedWords = 0;
+  const growthMultiplier = settings.frontierGrowth ?? 1;
   for (const [position, frag] of fragments.entries()) {
     processedWords += frag.tokens.length;
     const matches = [];
@@ -293,7 +298,8 @@ function scoreFragments(fragments, settings, report) {
       }
     }
 
-    collect(candidateIds(frag, fragments, index, frag.tokens, settings));
+    const effectiveRadius = settings.paragraphRadius * Math.min(frontierBoost, growthMultiplier);
+    collect(candidateIds(frag, fragments, index, frag.tokens, settings, effectiveRadius));
     matches.sort((a, b) => b.weighted - a.weighted || a.distance - b.distance || a.idx - b.idx);
 
     while (matches.length) {
@@ -309,7 +315,8 @@ function scoreFragments(fragments, settings, report) {
         if (bridge.length >= 4 * frontierBoost) break;
       }
       if (!bridge.length) break;
-      const expanded = candidateIds(frag, fragments, index, bridge, settings);
+      const expandRadius = settings.paragraphRadius * Math.min(frontierBoost, growthMultiplier);
+      const expanded = candidateIds(frag, fragments, index, bridge, settings, expandRadius);
       for (const id of matched) expanded.delete(id);
       if (!expanded.size) break;
       frontierTokens = new Set([...frontierTokens, ...bridge]);
@@ -801,13 +808,18 @@ export function analyze(text, settings = DEFAULT_SETTINGS, profileName = "med", 
     force: true,
   });
 
+  const profile = PROFILES[profileName];
+  const effectiveSettings = {
+    ...settings,
+    frontierGrowth: settings.frontierGrowth > 0 ? settings.frontierGrowth : (profile.frontierGrowth ?? 1),
+  };
+
   const scoreStart = now();
-  const rows = scoreFragments(fragments, settings, report);
+  const rows = scoreFragments(fragments, effectiveSettings, report);
   timings.score = now() - scoreStart;
   report({ stage: "Scored local repetition", stagePct: 55, metrics: { nearMatches: rows.length }, force: true });
 
   const selectStart = now();
-  const profile = PROFILES[profileName];
   const profileSelected = selectedRows(rows, fragments.length, profile);
   const localSeverity = normalizeScores(profileSelected, (row) => row.badness);
   const profileSpans = profileSelected.map((row) => ({

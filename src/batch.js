@@ -1,5 +1,5 @@
 export const BATCH_HISTORY_KEY = "refloor-lab:batch-history";
-export const ABLATION_VERSION = "middle-out-ablation.v1";
+export const ABLATION_VERSION = "ablation-lab.v1";
 
 const HISTORY_LIMIT = 250;
 
@@ -100,7 +100,7 @@ export function prefixAblationFrontmatter(text, { fileName, hash, profile, setti
       total: metrics.removedFragments,
     },
   };
-  return `---\nmiddle_out_ablation: ${JSON.stringify(payload)}\n---\n\n${text}`;
+  return `---\nablation_lab: ${JSON.stringify(payload)}\n---\n\n${text}`;
 }
 
 export function downloadText(name, text) {

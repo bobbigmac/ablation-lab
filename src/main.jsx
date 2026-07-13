@@ -434,6 +434,13 @@ function App() {
             onDown={() => setSettings((s) => ({ ...s, maxCandidatesPerToken: Math.max(20, s.maxCandidatesPerToken - 20) }))}
             onUp={() => setSettings((s) => ({ ...s, maxCandidatesPerToken: s.maxCandidatesPerToken + 20 }))}
           />
+          <Control
+            label="Growth"
+            value={settings.frontierGrowth === 0 ? "auto" : settings.frontierGrowth}
+            tooltip="How much the search radius grows when repeated patterns are found. 0/auto uses the profile default (low=1, med=3, high=4). 1 = fixed radius (no growth). Higher = reach further across the document for heavily repeating patterns."
+            onDown={() => setSettings((s) => ({ ...s, frontierGrowth: Math.max(0, s.frontierGrowth - 1) }))}
+            onUp={() => setSettings((s) => ({ ...s, frontierGrowth: Math.min(8, s.frontierGrowth + 1) }))}
+          />
         </section>
 
         <button className="primary" disabled={batchMode || !source || isCalculating} onClick={() => run()}>

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Find local repetition hotspots inside one cleaned book.
+Find local repetition hotspots in a markdown document.
 
 This works at thought-unit granularity:
 - split prose into comma/period-ish fragments
@@ -10,8 +10,8 @@ This works at thought-unit granularity:
 - rank fragments by local near-clone density and reusable-token overlap
 
 Usage:
-    python3 scripts/find-repetition-hotspots.py --book where-the-neon-remembered
-    python3 scripts/find-repetition-hotspots.py --file content/humanised-books/cleaned/foo_humanized.md
+    python3 scripts/find-repetition-hotspots.py --file path/to/document.md
+    python3 scripts/find-repetition-hotspots.py --file document.md --profiles low,med,high --write-refloors output/
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from typing import Iterable
 
 from nltk.tokenize import TreebankWordTokenizer
 
-BOOKS_DIR = Path("content/humanised-books/cleaned")
+BOOKS_DIR = Path("content")
 WORD_TOKENIZER = TreebankWordTokenizer()
 
 STOPWORDS = {
@@ -66,7 +66,6 @@ class Fragment:
     source_end: int
     starts_capitalized: bool
     tokens: tuple[str, ...]
-    content_tokens: tuple[str, ...]
 
 
 def strip_frontmatter(text: str) -> tuple[str, str]:
@@ -146,11 +145,6 @@ def tokenize_words(text: str, *, excluded_tokens: set[str] | None = None) -> tup
         if tok and tok not in excluded_tokens:
             out.append(tok)
     return tuple(out)
-
-
-def content_tokens(tokens: Iterable[str], *, excluded_tokens: set[str] | None = None) -> tuple[str, ...]:
-    excluded_tokens = excluded_tokens or set()
-    return tuple(tok for tok in tokens if tok not in excluded_tokens)
 
 
 def first_alpha(text: str) -> str | None:
@@ -251,7 +245,6 @@ def build_fragments(
                     source_end=end,
                     starts_capitalized=bool(alpha and alpha.isupper()),
                     tokens=tokens,
-                    content_tokens=content_tokens(tokens, excluded_tokens=excluded_tokens),
                 )
             )
     return fragments
@@ -277,40 +270,35 @@ def seq_similarity(a: tuple[str, ...], b: tuple[str, ...]) -> float:
 
 def fragment_similarity(a: Fragment, b: Fragment) -> dict[str, float]:
     raw_overlap = jaccard(set(a.tokens), set(b.tokens))
-    content_overlap = jaccard(set(a.content_tokens), set(b.content_tokens))
     raw_seq = seq_similarity(a.tokens, b.tokens)
-    content_seq = seq_similarity(a.content_tokens, b.content_tokens)
     bigram = jaccard(ngrams(a.tokens, 2), ngrams(b.tokens, 2))
     trigram = jaccard(ngrams(a.tokens, 3), ngrams(b.tokens, 3))
     size = 1.0 - abs(len(a.tokens) - len(b.tokens)) / max(len(a.tokens), len(b.tokens))
 
-    shared_content = len(set(a.content_tokens) & set(b.content_tokens))
     shared_raw = len(set(a.tokens) & set(b.tokens))
     token_a = set(a.tokens)
     token_b = set(b.tokens)
     exchange_pair = (
         ("i" in token_a and "you" in token_b)
         or ("you" in token_a and "i" in token_b)
-    ) and content_overlap >= 0.35
+    ) and raw_overlap >= 0.35
     score = (
-        0.24 * raw_overlap
-        + 0.20 * raw_seq
+        0.38 * raw_overlap
+        + 0.30 * raw_seq
         + 0.16 * bigram
-        + 0.14 * content_overlap
-        + 0.10 * content_seq
         + 0.08 * trigram
         + 0.08 * size
     )
     return {
         "score": score,
         "raw_overlap": raw_overlap,
-        "content_overlap": content_overlap,
+        "content_overlap": raw_overlap,
         "raw_seq": raw_seq,
-        "content_seq": content_seq,
+        "content_seq": raw_seq,
         "bigram": bigram,
         "trigram": trigram,
         "size": size,
-        "shared_content": shared_content,
+        "shared_content": shared_raw,
         "shared_raw": shared_raw,
         "exchange_pair": exchange_pair,
     }
@@ -319,8 +307,7 @@ def fragment_similarity(a: Fragment, b: Fragment) -> dict[str, float]:
 def build_token_index(fragments: list[Fragment]) -> dict[str, list[int]]:
     index: dict[str, list[int]] = defaultdict(list)
     for frag in fragments:
-        # Raw tokens catch scaffold repetition; content tokens catch independent thought overlap.
-        for tok in set(frag.tokens) | set(frag.content_tokens):
+        for tok in set(frag.tokens):
             index[tok].append(frag.idx)
     return index
 
@@ -331,7 +318,7 @@ def candidate_ids_for_tokens(
     index: dict[str, list[int]],
     tokens: Iterable[str],
     *,
-    paragraph_radius: int,
+    effective_radius: int,
     max_candidates_per_token: int,
 ) -> set[int]:
     ids: set[int] = set()
@@ -343,7 +330,7 @@ def candidate_ids_for_tokens(
             if idx == frag.idx:
                 continue
             other = fragments[idx]
-            if abs(other.para_index - frag.para_index) <= paragraph_radius:
+            if abs(other.para_index - frag.para_index) <= effective_radius:
                 ids.add(idx)
     return ids
 
@@ -353,15 +340,15 @@ def nearby_candidates(
     fragments: list[Fragment],
     index: dict[str, list[int]],
     *,
-    paragraph_radius: int,
+    effective_radius: int,
     max_candidates_per_token: int,
 ) -> set[int]:
     return candidate_ids_for_tokens(
         frag,
         fragments,
         index,
-        set(frag.tokens) | set(frag.content_tokens),
-        paragraph_radius=paragraph_radius,
+        set(frag.tokens),
+        effective_radius=effective_radius,
         max_candidates_per_token=max_candidates_per_token,
     )
 
@@ -384,6 +371,7 @@ def score_fragments(
     fragments: list[Fragment],
     *,
     paragraph_radius: int,
+    frontier_growth: int,
     min_match_score: float,
     min_shared_content: int,
     max_candidates_per_token: int,
@@ -391,18 +379,20 @@ def score_fragments(
 ) -> list[dict]:
     index = build_token_index(fragments)
     rows: list[dict] = []
+    growth_multiplier = max(1, frontier_growth)
 
     for frag in fragments:
+        effective_radius = paragraph_radius * min(1, growth_multiplier)
         candidate_ids = nearby_candidates(
             frag,
             fragments,
             index,
-            paragraph_radius=paragraph_radius,
+            effective_radius=effective_radius,
             max_candidates_per_token=max_candidates_per_token,
         )
         matches = []
         matched_ids: set[int] = set()
-        frontier_tokens = set(frag.tokens) | set(frag.content_tokens)
+        frontier_tokens = set(frag.tokens)
         frontier_boost = 1
 
         def collect_matches(ids: set[int]) -> None:
@@ -450,12 +440,13 @@ def score_fragments(
             if not bridge_tokens:
                 break
 
+            expand_radius = paragraph_radius * min(frontier_boost, growth_multiplier)
             expanded_ids = candidate_ids_for_tokens(
                 frag,
                 fragments,
                 index,
                 bridge_tokens,
-                paragraph_radius=paragraph_radius,
+                effective_radius=expand_radius,
                 max_candidates_per_token=max_candidates_per_token,
             ) - matched_ids
 
@@ -472,11 +463,11 @@ def score_fragments(
 
         local_token_counts: Counter[str] = Counter()
         for match in matches:
-            local_token_counts.update(fragments[match["idx"]].content_tokens)
+            local_token_counts.update(fragments[match["idx"]].tokens)
 
-        reusable = sum(1 for tok in set(frag.content_tokens) if local_token_counts[tok] > 0)
-        unique = len(set(frag.content_tokens)) - reusable
-        reusable_ratio = reusable / max(1, len(set(frag.content_tokens)))
+        reusable = sum(1 for tok in set(frag.tokens) if local_token_counts[tok] > 0)
+        unique = len(set(frag.tokens)) - reusable
+        reusable_ratio = reusable / max(1, len(set(frag.tokens)))
         density = sum(m["weighted"] for m in matches)
         badness = density * (1 + min(len(matches), 8) / 4) * (0.5 + reusable_ratio)
 
@@ -735,6 +726,7 @@ REFLOOR_PROFILES = {
         "max_unique": 2,
         "max_remove_ratio": 0.08,
         "allow_capitalized": False,
+        "frontier_growth": 1,
     },
     "med": {
         "min_badness": 1.8,
@@ -744,6 +736,7 @@ REFLOOR_PROFILES = {
         "max_unique": 4,
         "max_remove_ratio": 0.18,
         "allow_capitalized": True,
+        "frontier_growth": 3,
     },
     "high": {
         "min_badness": 1.0,
@@ -753,6 +746,7 @@ REFLOOR_PROFILES = {
         "max_unique": 6,
         "max_remove_ratio": 0.35,
         "allow_capitalized": True,
+        "frontier_growth": 4,
     },
 }
 
@@ -869,7 +863,6 @@ def apply_profile(text: str, selected: list[dict]) -> str:
             source_end=end,
             starts_capitalized=frag.starts_capitalized,
             tokens=frag.tokens,
-            content_tokens=frag.content_tokens,
         ))
         cleaned = cleaned[:left] + " @ " + cleaned[right:]
     return cleanup_text(normalize_edit_markers(cleaned))
@@ -1195,7 +1188,7 @@ def snippet(text: str, limit: int = 260) -> str:
 def resolve_book_path(args: argparse.Namespace) -> Path:
     if bool(args.book) == bool(args.file):
         raise SystemExit("Provide exactly one of --book or --file")
-    path = BOOKS_DIR / f"{args.book}_humanized.md" if args.book else Path(args.file)
+    path = BOOKS_DIR / f"{args.book}.md" if args.book else Path(args.file)
     if not path.exists():
         raise SystemExit(f"Missing file: {path}")
     return path
@@ -1212,6 +1205,13 @@ def parse_profile_names(raw: str) -> list[str]:
     return names
 
 
+def frontier_growth_for_args(args: argparse.Namespace) -> int:
+    if args.frontier_growth > 0:
+        return args.frontier_growth
+    first_profile = REFLOOR_PROFILES[args.profile_names[0]]
+    return first_profile["frontier_growth"]
+
+
 def analyze_book(path: Path, args: argparse.Namespace, out_dir: Path | None = None) -> dict:
     text = path.read_text(encoding="utf-8")
     frontmatter, _ = strip_frontmatter(text)
@@ -1221,6 +1221,7 @@ def analyze_book(path: Path, args: argparse.Namespace, out_dir: Path | None = No
     rows = score_fragments(
         fragments,
         paragraph_radius=args.paragraph_radius,
+        frontier_growth=frontier_growth_for_args(args),
         min_match_score=args.min_match_score,
         min_shared_content=args.min_shared_content,
         max_candidates_per_token=args.max_candidates_per_token,
@@ -1313,14 +1314,15 @@ def write_metrics_summary(results: list[dict], out_dir: Path) -> tuple[Path, Pat
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Find local fragment repetition hotspots in one cleaned book")
-    parser.add_argument("--book", help="Book slug under content/humanised-books/cleaned/")
+    parser = argparse.ArgumentParser(description="Find local fragment repetition hotspots in a markdown document")
+    parser.add_argument("--book", help="Document slug under the content directory")
     parser.add_argument("--file", help="Explicit markdown file path")
-    parser.add_argument("--all", action="store_true", help="Process every cleaned *_humanized.md book")
+    parser.add_argument("--all", action="store_true", help="Process every *.md file in the content directory")
     parser.add_argument("--top", type=int, default=40, help="How many ranked fragments to print")
     parser.add_argument("--template-top", type=int, default=40, help="How many diffuse scaffold templates to report")
     parser.add_argument("--profiles", default="med", help="Comma-separated refloor profiles to write; default: med")
     parser.add_argument("--paragraph-radius", type=int, default=6, help="Compare fragments within this many paragraphs")
+    parser.add_argument("--frontier-growth", type=int, default=0, help="How much the search radius grows per frontier expansion. 0 = auto (use profile default: low=1, med=3, high=4). 1 = fixed radius. Higher = reach further for repeating patterns.")
     parser.add_argument("--min-tokens", type=int, default=3, help="Minimum raw tokens per fragment")
     parser.add_argument("--min-match-score", type=float, default=0.24, help="Minimum fragment similarity to count as a near-match")
     parser.add_argument("--min-shared-content", type=int, default=1, help="Minimum shared non-stopword tokens unless raw bigrams match")
@@ -1339,7 +1341,7 @@ def main() -> None:
         if args.write_pattern_bakeoff:
             raise SystemExit("--write-pattern-bakeoff is only supported for single-book runs")
         out_dir = Path(args.write_refloors)
-        paths = sorted(BOOKS_DIR.glob("*_humanized.md"))
+        paths = sorted(BOOKS_DIR.glob("*.md"))
         results = []
         for index, path in enumerate(paths, 1):
             print(f"[{index}/{len(paths)}] {path.name}")
