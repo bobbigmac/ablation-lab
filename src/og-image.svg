@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <rect width="1200" height="630" fill="#20302b"/>
+  <rect x="40" y="40" width="1120" height="550" fill="none" stroke="#b99865" stroke-width="3"/>
+
+  <!-- Title: ABLATION LAB -->
+  <text x="600" y="130" font-family="Helvetica, Arial, sans-serif" font-size="28" fill="#8a9a92" text-anchor="middle" letter-spacing="6" font-weight="600">
+    ABLATION LAB
+  </text>
+
+  <!-- Tagline line 1: "AI text" -->
+  <text x="600" y="240" font-family="Georgia, serif" font-size="72" fill="#f5f1e8" text-anchor="middle" font-weight="700">
+    AI text
+  </text>
+
+  <!-- Tagline line 2: [middle out] with blue local-removal highlight + strikethrough -->
+  <rect x="402" y="278" width="396" height="60" rx="4" fill="rgba(38,118,168,0.72)"/>
+  <text x="600" y="328" font-family="'Courier New', monospace" font-size="56" fill="#f5f1e8" text-anchor="middle" font-weight="700">
+    [middle out]
+  </text>
+  <line x1="412" y1="308" x2="788" y2="308" stroke="rgba(16,72,111,0.95)" stroke-width="4"/>
+
+  <!-- Tagline line 3: "slightly improved" with italic emphasis -->
+  <text x="600" y="420" font-family="Georgia, serif" font-size="72" fill="#f5f1e8" text-anchor="middle" font-weight="700">
+    <tspan font-style="italic" fill="#d9caa8">slightly</tspan> improved
+  </text>
+
+  <!-- Divider -->
+  <line x1="400" y1="465" x2="800" y2="465" stroke="#b99865" stroke-width="2"/>
+
+  <!-- Subtitle -->
+  <text x="600" y="505" font-family="Helvetica, Arial, sans-serif" font-size="22" fill="#8a9a92" text-anchor="middle" letter-spacing="3">
+    REPETITION DETECTION &amp; ABLATION
+  </text>
+
+  <!-- ASCII diff example showing the visual language of our highlights -->
+  <!-- Using monospace so character widths are predictable: 22px font, each char ~13.2px -->
+  <!-- "the thing was the thing that was the thing they made" = 53 chars, total ~700px, start x=250 -->
+  <!-- Blue highlight on first "was the thing" (local removal) chars 10-22 -->
+  <rect x="383" y="538" width="172" height="28" rx="2" fill="rgba(38,118,168,0.55)"/>
+  <!-- Amber highlight on second "was the thing" (scaffold removal) -->
+  <rect x="633" y="538" width="172" height="28" rx="2" fill="rgba(139,82,31,0.55)"/>
+
+  <text x="250" y="558" font-family="'Courier New', monospace" font-size="22" fill="#f5f1e8">
+    the thing <tspan fill="#18211e">was the thing</tspan> that <tspan fill="#18211e">was the thing</tspan> they made
+  </text>
+  <!-- Strikethrough lines for the two highlighted segments -->
+  <line x1="383" y1="552" x2="555" y2="552" stroke="rgba(16,72,111,0.9)" stroke-width="2.5"/>
+  <line x1="633" y1="552" x2="805" y2="552" stroke="rgba(83,45,13,0.9)" stroke-width="2.5"/>
+</svg>
