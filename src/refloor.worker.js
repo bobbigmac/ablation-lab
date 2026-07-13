@@ -12,8 +12,15 @@ self.onmessage = (event) => {
   try {
     if (type === "batch") {
       self.postMessage({ id, type: "batch-status", status: "Indexing batch prior" });
-      const preparedDocs = files.map((file) => prepareDocumentForBatch(file.text, settings));
+      const preparedDocs = files.map((file, i) => {
+        self.postMessage({ id, type: "batch-progress", progress: { stage: `Indexing files (${i + 1}/${files.length})`, progressPct: (i / files.length) * 5, force: true } });
+        return prepareDocumentForBatch(file.text, settings);
+      });
+      let lastPriorProgressAt = 0;
       const { patternModel } = buildBatchPatternModel(preparedDocs, (progress) => {
+        const now = globalThis.performance?.now ? globalThis.performance.now() : Date.now();
+        if (!progress.force && now - lastPriorProgressAt < 1000) return;
+        lastPriorProgressAt = now;
         self.postMessage({ id, type: "batch-progress", progress: { ...progress, stage: progress.stage ?? "Building shared scaffold prior" } });
       });
       files.forEach((file, index) => {

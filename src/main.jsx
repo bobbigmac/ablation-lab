@@ -143,7 +143,8 @@ function App() {
       }
       if (type === "batch-progress") {
         if (!fileId) {
-          setBatchStatus(nextProgress?.stage ?? "Building batch prior");
+          const pct = nextProgress?.progressPct;
+          setBatchStatus(pct != null ? `${nextProgress.stage ?? "Building batch prior"} (${Math.round(pct)}%)` : nextProgress?.stage ?? "Building batch prior");
           return;
         }
         setBatchStatus(batch ? `${batch.stage} ${batch.index}/${batch.total}` : nextProgress.stage);
@@ -541,6 +542,9 @@ function App() {
           </>
         )}
       </section>
+      <footer className="footer">
+        <a href="https://github.com/bobbigmac/ablation-lab" target="_blank" rel="noopener noreferrer">GitHub</a>
+      </footer>
     </main>
   );
 }

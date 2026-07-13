@@ -389,17 +389,23 @@ function wildcardSets(length) {
   return out;
 }
 
-function gappedTemplates(fragments, report) {
-  const wildcardCache = new Map();
-  for (let length = 5; length <= 9; length += 1) wildcardCache.set(length, wildcardSets(length));
-  const rows = new Map();
+function scanTemplatesForFragments(fragments, rows, wildcardCache, hotTokens, report) {
+  const useFilter = hotTokens && hotTokens.size > 0;
   let processedWords = 0;
+  let pruneCounter = 0;
   for (const [position, frag] of fragments.entries()) {
     processedWords += frag.tokens.length;
     for (let length = 5; length <= 9; length += 1) {
       if (frag.tokens.length < length) continue;
       for (let start = 0; start <= frag.tokens.length - length; start += 1) {
         const window = frag.tokens.slice(start, start + length);
+        if (useFilter) {
+          let hasHot = false;
+          for (const tok of window) {
+            if (hotTokens.has(tok)) { hasHot = true; break; }
+          }
+          if (!hasHot) continue;
+        }
         for (const wildcards of wildcardCache.get(length)) {
           const template = window.map((token, index) => (wildcards.includes(index) ? "_" : token));
           if (new Set(template.filter((token) => token !== "_")).size < 3) continue;
@@ -437,11 +443,40 @@ function gappedTemplates(fragments, report) {
         }
       }
     }
+    pruneCounter += 1;
+    if (pruneCounter >= 500) {
+      pruneCounter = 0;
+      for (const [id, row] of rows) {
+        if (row.count < 2) rows.delete(id);
+      }
+    }
     report?.({
       stage: "Finding scaffold templates",
       stagePct: 58 + (position / Math.max(1, fragments.length)) * 18,
       metrics: { processedFragments: position + 1, processedWords, templateSeeds: rows.size },
     });
+  }
+}
+
+function extractHotTokens(rows, minTemplateCount = 2) {
+  const tokenFreq = new Map();
+  for (const row of rows.values()) {
+    if (row.count < minTemplateCount) continue;
+    for (const token of row.template) {
+      if (token === "_") continue;
+      tokenFreq.set(token, (tokenFreq.get(token) ?? 0) + 1);
+    }
+  }
+  const hot = new Set();
+  for (const [token, templateCount] of tokenFreq) {
+    if (templateCount >= 2) hot.add(token);
+  }
+  return hot;
+}
+
+function rankAndDedupTemplates(rows) {
+  for (const row of rows.values()) {
+    row.occurrences = null;
   }
   const ranked = [...rows.values()].map((row) => {
     const slotVariety = row.slots.reduce((sum, slot) => sum + slot.size, 0);
@@ -478,6 +513,14 @@ function gappedTemplates(fragments, report) {
     const { occurrences, footprint, sections, ...rest } = row;
     return rest;
   });
+}
+
+function gappedTemplates(fragments, report) {
+  const wildcardCache = new Map();
+  for (let length = 5; length <= 9; length += 1) wildcardCache.set(length, wildcardSets(length));
+  const rows = new Map();
+  scanTemplatesForFragments(fragments, rows, wildcardCache, null, report);
+  return rankAndDedupTemplates(rows);
 }
 
 function setOverlap(a, b) {
@@ -735,21 +778,49 @@ export function prepareDocumentForBatch(text, settings = DEFAULT_SETTINGS) {
 }
 
 export function buildBatchPatternModel(preparedDocs, report = null) {
-  const fragments = preparedDocs.flatMap((doc, docIndex) => doc.fragments.map((fragment) => ({ ...fragment, batchDocIndex: docIndex })));
-  fragments.forEach((fragment, index) => { fragment.idx = index; });
+  const wildcardCache = new Map();
+  for (let length = 5; length <= 9; length += 1) wildcardCache.set(length, wildcardSets(length));
+  const rows = new Map();
+  let hotTokens = null;
+  let globalIdx = 0;
+
+  for (const [docIndex, doc] of preparedDocs.entries()) {
+    const docFragments = doc.fragments.map((f) => ({ ...f, idx: globalIdx++, batchDocIndex: docIndex }));
+    const isFiltered = hotTokens && hotTokens.size > 0;
+
+    report?.({
+      stage: `Scaffold scan: file ${docIndex + 1}/${preparedDocs.length}${isFiltered ? ` (${hotTokens.size} hot tokens)` : " (building hot token set)"}`,
+      progressPct: 5 + (docIndex / preparedDocs.length) * 40,
+      metrics: { templateSeeds: rows.size },
+      force: true,
+    });
+
+    scanTemplatesForFragments(docFragments, rows, wildcardCache, hotTokens, (progress) => {
+      const fragProgress = progress.metrics?.processedFragments ?? 0;
+      report?.({
+        ...progress,
+        stage: `File ${docIndex + 1}/${preparedDocs.length}: ${progress.stage}${isFiltered ? ` (${hotTokens.size} hot tokens)` : ""}`,
+        progressPct: 5 + ((docIndex + fragProgress / Math.max(1, docFragments.length)) / preparedDocs.length) * 40,
+      });
+    });
+
+    hotTokens = extractHotTokens(rows);
+  }
+
   report?.({
-    stage: "Building shared scaffold prior",
-    progressPct: 8,
-    metrics: {
-      processedFragments: fragments.length,
-      processedWords: fragments.reduce((sum, fragment) => sum + fragment.tokens.length, 0),
-    },
+    stage: "Ranking scaffold templates",
+    progressPct: 48,
     force: true,
   });
-  const templateRows = gappedTemplates(fragments, (progress) => report?.({
-    ...progress,
-    progressPct: Math.max(8, Math.min(24, progress.stagePct / 4)),
-  }));
+
+  const templateRows = rankAndDedupTemplates(rows);
+
+  report?.({
+    stage: "Scaffold prior built",
+    progressPct: 50,
+    force: true,
+  });
+
   return {
     templateRows,
     patternModel: patternModelFromTemplate(templateRows[0]),

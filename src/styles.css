@@ -619,3 +619,18 @@ pre {
   }
 
 }
+
+.footer {
+  padding: 12px 24px;
+  text-align: center;
+}
+
+.footer a {
+  color: #8a9a92;
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.footer a:hover {
+  color: #b99865;
+}
