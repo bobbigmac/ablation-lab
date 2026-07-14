@@ -756,6 +756,16 @@ def flag_patternized_fragments(fragments: list[Fragment]) -> list[dict]:
 
 
 REFLOOR_PROFILES = {
+    "none": {
+        "min_badness": 999.0,
+        "min_viable": 999.0,
+        "min_matches": 999,
+        "min_reuse": 999.0,
+        "max_unique": 0,
+        "max_remove_ratio": 0.0,
+        "allow_capitalized": False,
+        "frontier_growth": 0,
+    },
     "low": {
         "min_badness": 2.8,
         "min_viable": 0.50,
