@@ -73,9 +73,9 @@ export function countRemovalMethods(spans = []) {
 }
 
 function scaffoldModeName(outputMode) {
-  if (outputMode === "pattern-ceiling") return "light";
-  if (outputMode === "pattern-floor2") return "medium";
-  if (outputMode === "pattern-floor1") return "hard";
+  if (outputMode === "pattern-threshold-dedup") return "light";
+  if (outputMode === "pattern-keep-2") return "medium";
+  if (outputMode === "pattern-keep-1") return "hard";
   return "off";
 }
 

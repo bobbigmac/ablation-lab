@@ -22,6 +22,8 @@ The Python script (`scripts/find-repetition-hotspots.py`) supports `--batch` mod
 
 4. **Don't mine @-marked chunks for value.** You can diff the output against the original to recover the removed text, but in our experience it's better to throw the chunk than try to salvage value-words from it. If the tool flagged it as redundant, it almost certainly is. Trust the cut and heal the break, don't try to re-insert fragments.
 
+5. **Batch vs single-file.** The scaffold search works better (and faster) on text that shares more patterns, because of the large but easily dissolved search space. For very large repetitive corpuses, prefer running files individually in single-file mode rather than as a batch.
+
 ## Settings JSON format
 
 The copied JSON uses snake_case keys matching the Python CLI:

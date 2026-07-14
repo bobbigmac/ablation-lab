@@ -1136,25 +1136,27 @@ def select_pattern_candidates(candidates: list[dict], policy: str) -> list[dict]
         by_part[candidate["fragment"].para_index].append(candidate)
 
     selected: list[dict] = []
-    if policy.startswith("floor"):
-        keep = int(policy.removeprefix("floor"))
+    if policy.startswith("keep-"):
+        keep = int(policy.removeprefix("keep-"))
         for group in by_part.values():
-            group.sort(key=lambda item: item["fragment"].idx)
+            # Sort by score descending: highest-scoring (most typical) first.
+            # Remove the most typical instances, keep the atypical ones.
+            group.sort(key=lambda item: item["score"], reverse=True)
             selected.extend(group[keep:])
         return selected
 
-    if policy == "ceiling":
+    if policy == "threshold-dedup":
         scores = sorted(candidate["score"] for candidate in candidates)
         if not scores:
             return []
         threshold = max(0.58, scores[int(len(scores) * 0.72)])
         for group in by_part.values():
             high_confidence = [candidate for candidate in group if candidate["score"] >= threshold]
-            high_confidence.sort(key=lambda item: item["fragment"].idx)
+            high_confidence.sort(key=lambda item: item["score"], reverse=True)
             selected.extend(high_confidence[1:])
         return selected
 
-    raise ValueError(f"Unknown pattern policy: {policy}")
+    raise ValueError(f"Unknown pattern policy: {policy}")  # keep-N, threshold-dedup, or off
 
 
 def write_pattern_bakeoff(
@@ -1174,13 +1176,13 @@ def write_pattern_bakeoff(
     candidates = pattern_candidates(fragments, model, min_score=min_score)
     original_words = word_count(text)
     written: list[dict] = []
-    policies = ("floor1", "floor2", "ceiling")
+    policies = ("keep-1", "keep-2", "threshold-dedup")
     for policy in policies:
         selected = select_pattern_candidates(candidates, policy)
         rows = [{"fragment": candidate["fragment"]} for candidate in selected]
         output = apply_profile(text, rows)
         kept_words = word_count(output)
-        out_path = out_dir / f"{path.stem}.pattern-{policy}.md"
+        out_path = out_dir / f"{path.stem}.scaffold-{policy}.md"
         out_path.write_text(output, encoding="utf-8")
         written.append(
             {
@@ -1362,8 +1364,8 @@ def build_batch_pattern_model(prepared_docs: list[dict]) -> dict | None:
     scaffold_elapsed = time.time() - scaffold_start
     print(f"  Scaffold build done in {scaffold_elapsed:.1f}s")
     template_rows = rank_and_dedup_templates(templates)
-    model = pattern_model_from_template(template_rows[0] if template_rows else None)
-    return model, template_rows
+    models = [pattern_model_from_template(row) for row in template_rows if row]
+    return models, template_rows
 
 
 def build_split_batch_pattern_model(
@@ -1372,13 +1374,13 @@ def build_split_batch_pattern_model(
     splits: int = 2,
     crossover: bool = False,
     peak_k: int = 5,
-) -> dict | None:
+) -> list[dict] | None:
     import time
 
     n = len(prepared_docs)
     if splits < 2 or n < 2:
-        model, _rows = build_batch_pattern_model(prepared_docs)
-        return model
+        models, _rows = build_batch_pattern_model(prepared_docs)
+        return models
 
     doc_tokens = [sum(len(f.tokens) for f in doc["fragments"]) for doc in prepared_docs]
     total_tokens = sum(doc_tokens)
@@ -1407,7 +1409,7 @@ def build_split_batch_pattern_model(
 
         group_docs = [prepared_docs[i] for i in group_doc_indices]
         print(f"\n  --- Sub-batch {g+1}/{splits}: {len(group_docs)} files ---")
-        model, template_rows = build_batch_pattern_model(group_docs)
+        _models, template_rows = build_batch_pattern_model(group_docs)
 
         if template_rows:
             top_rows = template_rows[:peak_k]
@@ -1423,11 +1425,19 @@ def build_split_batch_pattern_model(
     if not all_peak_rows:
         return None
 
-    # Pick the best pattern model by source_count across all peaks
-    best_row = max(all_peak_rows, key=lambda r: r["count"])
-    best_model = pattern_model_from_template(best_row)
-    print(f"  Best peak: {best_model['soft_text']} (source count: {best_model['source_count']}) from {len(all_peak_rows)} candidates")
-    return best_model
+    # Sort all peak rows by count descending and build models from all of them.
+    # Deduplicate by soft_text to avoid processing the same pattern twice.
+    all_peak_rows.sort(key=lambda r: r["count"], reverse=True)
+    seen_text: set[str] = set()
+    all_models: list[dict] = []
+    for row in all_peak_rows:
+        if row["soft_text"] in seen_text:
+            continue
+        seen_text.add(row["soft_text"])
+        all_models.append(pattern_model_from_template(row))
+    if all_models:
+        print(f"  Best peak: {all_models[0]['soft_text']} (source count: {all_models[0]['source_count']}) from {len(all_models)} patterns")
+    return all_models
 
 
 def merged_spans(spans: list[dict]) -> list[dict]:
@@ -1479,7 +1489,7 @@ def analyze_text(
     pattern_min_score: float,
     profile_name: str,
     scaffold_policy: str = "off",
-    pattern_model: dict | None = None,
+    pattern_models: list[dict] | None = None,
 ) -> dict:
     frontmatter, _ = strip_frontmatter(text)
     paragraphs = parse_paragraphs(text)
@@ -1501,12 +1511,35 @@ def analyze_text(
     local_selected = selected_for_profile(rows, len(fragments), profile)
 
     template_rows = gapped_template_rows(fragments, max_items=40)
-    effective_model = pattern_model if pattern_model is not None else pattern_model_from_template(template_rows[0] if template_rows else None)
+
+    # Build pattern models: use externally provided models (batch mode) or
+    # build from the file's own template rows (single-file mode).
+    if pattern_models is not None:
+        models = pattern_models
+    elif template_rows:
+        models = [pattern_model_from_template(row) for row in template_rows]
+    else:
+        models = []
+
+    # Sort models by source_count descending so the most-repeated patterns
+    # are processed first. This creates a cascade: the peakiest patterns get
+    # culled before moving to less-repeated ones, and deduplication prevents
+    # a fragment from being removed twice.
+    models.sort(key=lambda m: m["source_count"] if m else 0, reverse=True)
 
     scaffold_selected: list[dict] = []
-    if scaffold_policy != "off" and effective_model:
-        candidates = pattern_candidates(fragments, effective_model, min_score=pattern_min_score)
-        scaffold_selected = select_pattern_candidates(candidates, scaffold_policy)
+    if scaffold_policy != "off" and models:
+        seen_fragments: set[int] = set()
+        for model in models:
+            if not model:
+                continue
+            candidates = pattern_candidates(fragments, model, min_score=pattern_min_score)
+            selected = select_pattern_candidates(candidates, scaffold_policy)
+            for cand in selected:
+                frag_idx = cand["fragment"].idx
+                if frag_idx not in seen_fragments:
+                    seen_fragments.add(frag_idx)
+                    scaffold_selected.append(cand)
 
     local_spans: list[dict] = []
     for row in local_selected:
@@ -1549,7 +1582,7 @@ def analyze_text(
         "fragments": fragments,
         "rows": rows,
         "template_rows": template_rows,
-        "pattern_model": effective_model,
+        "pattern_model": models[0] if models else None,
         "metrics": {
             "original_words": original_words,
             "kept_words": kept_words,
@@ -1581,11 +1614,47 @@ def analyze_book(path: Path, args: argparse.Namespace, out_dir: Path | None = No
     phrase_rows = repeated_phrases(rows)
     pattern_rows = flag_patternized_fragments(fragments)
 
+    scaffold_policy = SCAFFOLD_POLICY_MAP.get(args.scaffold, "off")
+
     written: list[dict] = []
     bakeoff_written: list[dict] = []
     report_path: Path | None = None
     if out_dir:
-        written = write_refloors(text, path, rows, fragments, out_dir, args.profile_names)
+        if scaffold_policy != "off":
+            # Use analyze_text for scaffold-enabled runs so the scaffold pass runs
+            result = analyze_text(
+                text,
+                min_tokens=args.min_tokens,
+                paragraph_radius=args.paragraph_radius,
+                frontier_growth=frontier_growth_for_args(args),
+                min_match_score=args.min_match_score,
+                min_shared_content=args.min_shared_content,
+                max_candidates_per_token=args.max_candidates_per_token,
+                pattern_min_score=args.pattern_min_score,
+                profile_name=args.profile_names[0],
+                scaffold_policy=scaffold_policy,
+            )
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for name in args.profile_names:
+                if out_dir.resolve() == path.parent.resolve():
+                    out_path = out_dir / f"{path.stem}.{name}.md"
+                else:
+                    out_path = out_dir / f"{path.stem}.md"
+                refloored = result["refloored"]
+                original_words = result["metrics"]["original_words"]
+                kept_words = result["metrics"]["kept_words"]
+                out_path.write_text(refloored, encoding="utf-8")
+                written.append({
+                    "profile": name,
+                    "path": out_path,
+                    "removed_fragments": result["metrics"]["removed_fragments"],
+                    "original_words": original_words,
+                    "kept_words": kept_words,
+                    "stripped_words": max(0, original_words - kept_words),
+                    "kept_pct": kept_words / max(1, original_words) * 100,
+                })
+        else:
+            written = write_refloors(text, path, rows, fragments, out_dir, args.profile_names)
         report_path = write_pattern_report(
             path,
             rows,
@@ -1665,9 +1734,9 @@ def write_metrics_summary(results: list[dict], out_dir: Path) -> tuple[Path, Pat
 
 SCAFFOLD_POLICY_MAP = {
     "off": "off",
-    "light": "ceiling",
-    "medium": "floor2",
-    "hard": "floor1",
+    "light": "threshold-dedup",
+    "medium": "keep-2",
+    "hard": "keep-1",
 }
 
 
@@ -1707,11 +1776,11 @@ def run_batch(args: argparse.Namespace) -> None:
     print()
     print("Building shared scaffold prior...")
     if args.batch_split and args.batch_split > 1:
-        pattern_model = build_split_batch_pattern_model(prepared_docs, splits=args.batch_split, crossover=args.batch_crossover)
+        pattern_models = build_split_batch_pattern_model(prepared_docs, splits=args.batch_split, crossover=args.batch_crossover)
     else:
-        pattern_model, _rows = build_batch_pattern_model(prepared_docs)
-    if pattern_model:
-        print(f"  Model: {pattern_model['soft_text']} (source count: {pattern_model['source_count']})")
+        pattern_models, _rows = build_batch_pattern_model(prepared_docs)
+    if pattern_models:
+        print(f"  Models: {len(pattern_models)} patterns (top: {pattern_models[0]['soft_text']}, source count: {pattern_models[0]['source_count']})")
     else:
         print("  No scaffold templates met the threshold.")
     print()
@@ -1743,7 +1812,7 @@ def run_batch(args: argparse.Namespace) -> None:
             pattern_min_score=args.pattern_min_score,
             profile_name=profile_name,
             scaffold_policy=scaffold_policy,
-            pattern_model=pattern_model,
+            pattern_models=pattern_models,
         )
         file_hash = _sha256_file(path)
         processed_at = datetime.now(timezone.utc).isoformat()
@@ -1813,10 +1882,10 @@ def run_batch(args: argparse.Namespace) -> None:
     print(f"  Words (stripped):     {total_stripped}  ({100 - overall_pct:.1f}% of original)")
     print(f"  Words (kept %):       {overall_pct:.1f}%")
     print(f"  Fragments removed:    {total_removed}  (local: {total_local}, scaffold: {total_scaffold})")
-    if pattern_model:
-        print(f"  Scaffold model:       {pattern_model['soft_text']}  ({pattern_model['source_count']} source hits)")
+    if pattern_models:
+        print(f"  Scaffold models:      {len(pattern_models)} patterns (top: {pattern_models[0]['soft_text']}, {pattern_models[0]['source_count']} source hits)")
     else:
-        print(f"  Scaffold model:       none (no templates met threshold)")
+        print(f"  Scaffold models:      none (no templates met threshold)")
     print(f"  Profile:              {profile_name}")
     print(f"  Scaffold pass:        {args.scaffold}")
     print()

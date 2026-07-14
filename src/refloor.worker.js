@@ -17,7 +17,7 @@ self.onmessage = (event) => {
         return prepareDocumentForBatch(file.text, settings);
       });
       let lastPriorProgressAt = 0;
-      const { patternModel } = buildBatchPatternModel(preparedDocs, (progress) => {
+      const { patternModels } = buildBatchPatternModel(preparedDocs, (progress) => {
         const now = globalThis.performance?.now ? globalThis.performance.now() : Date.now();
         if (!progress.force && now - lastPriorProgressAt < 1000) return;
         lastPriorProgressAt = now;
@@ -45,7 +45,7 @@ self.onmessage = (event) => {
             progress: { stage: "Starting", progressPct: 0, metrics: {}, force: true },
             batch: { index: index + 1, total: files.length, stage: "Processing files" },
           });
-          const result = analyze(file.text, settings, profile, postFileProgress, { patternModel });
+          const result = analyze(file.text, settings, profile, postFileProgress, { patternModels });
           self.postMessage({ id, type: "batch-result", fileId: file.fileId, result });
         } catch (error) {
           self.postMessage({

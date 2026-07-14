@@ -21,21 +21,21 @@ const OUTPUT_OPTIONS = [
     title: "Only run the local duplicate-fragment pass.",
   },
   {
-    mode: "pattern-ceiling",
+    mode: "pattern-threshold-dedup",
     label: "Light",
     slug: "ablation-light",
     strength: "light",
     title: "Add a light scaffold ablation pass that only removes the strongest repeated pattern matches.",
   },
   {
-    mode: "pattern-floor2",
+    mode: "pattern-keep-2",
     label: "Medium",
     slug: "ablation-medium",
     strength: "medium",
     title: "Add a medium scaffold ablation pass that usually keeps up to two nearby uses of the same pattern.",
   },
   {
-    mode: "pattern-floor1",
+    mode: "pattern-keep-1",
     label: "Hard",
     slug: "ablation-hard",
     strength: "hard",
@@ -634,6 +634,7 @@ characters: [Alice, Bob, Dr. Chen, Alexandria, Egypt]
           <section>
             <h3>Batch mode</h3>
             <p>Upload multiple <code>.md</code> files to process them all at once. Results are auto-downloaded with ablation frontmatter prefixed. Batch history (metadata only, no file contents) is stored in localStorage for reference.</p>
+            <p className="note">The scaffold search works better (and faster) on text that shares more patterns, because of the large but easily dissolved search space. For very large repetitive corpuses, you may prefer to run files individually in single-file mode rather than as a batch.</p>
           </section>
           <section>
             <h3>Privacy</h3>

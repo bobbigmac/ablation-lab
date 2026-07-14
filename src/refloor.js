@@ -45,7 +45,7 @@ export const DEFAULT_SETTINGS = {
   minTokens: 3,
   maxCandidatesPerToken: 180,
   top: 30,
-  outputMode: "pattern-ceiling",
+  outputMode: "pattern-threshold-dedup",
   patternMinScore: 0.52,
 };
 
@@ -715,19 +715,21 @@ function selectPatternCandidates(candidates, policy) {
     byPart.get(key).push(candidate);
   }
   const selected = [];
-  if (policy.startsWith("floor")) {
-    const keep = Number(policy.replace("floor", ""));
+  if (policy.startsWith("keep-")) {
+    const keep = Number(policy.replace("keep-", ""));
     for (const group of byPart.values()) {
-      group.sort((a, b) => a.fragment.idx - b.fragment.idx);
+      // Sort by score descending: highest-scoring (most typical) first.
+      // Remove the most typical instances, keep the atypical ones.
+      group.sort((a, b) => b.score - a.score);
       selected.push(...group.slice(keep));
     }
     return selected;
   }
-  if (policy === "ceiling") {
+  if (policy === "threshold-dedup") {
     const scores = candidates.map((candidate) => candidate.score).sort((a, b) => a - b);
     const threshold = scores.length ? Math.max(0.58, scores[Math.floor(scores.length * 0.72)]) : 1;
     for (const group of byPart.values()) {
-      const highConfidence = group.filter((candidate) => candidate.score >= threshold).sort((a, b) => a.fragment.idx - b.fragment.idx);
+      const highConfidence = group.filter((candidate) => candidate.score >= threshold).sort((a, b) => b.score - a.score);
       selected.push(...highConfidence.slice(1));
     }
   }
@@ -835,7 +837,7 @@ export function buildBatchPatternModel(preparedDocs, report = null) {
 
   return {
     templateRows,
-    patternModel: patternModelFromTemplate(templateRows[0]),
+    patternModels: templateRows.map((row) => patternModelFromTemplate(row)).filter(Boolean),
   };
 }
 
@@ -927,10 +929,27 @@ export function analyze(text, settings = DEFAULT_SETTINGS, profileName = "med", 
   });
 
   const patternStart = now();
-  const patternModel = options.patternModel ?? patternModelFromTemplate(templateRows[0]);
-  const patternCandidateRows = patternCandidates(fragments, patternModel, settings.patternMinScore, report);
+  const patternModels = options.patternModels ?? (templateRows.length ? templateRows.map((row) => patternModelFromTemplate(row)).filter(Boolean) : []);
+  // Sort by sourceCount descending: peakiest patterns first for cascading removal
+  patternModels.sort((a, b) => (b?.sourceCount ?? 0) - (a?.sourceCount ?? 0));
+
   const policy = settings.outputMode?.startsWith("pattern-") ? settings.outputMode.replace("pattern-", "") : "off";
-  const patternSelected = policy === "off" ? [] : selectPatternCandidates(patternCandidateRows, policy);
+  const patternSelected = [];
+  if (policy !== "off" && patternModels.length) {
+    const seenFragments = new Set();
+    for (const model of patternModels) {
+      if (!model) continue;
+      const candidates = patternCandidates(fragments, model, settings.patternMinScore, report);
+      const selected = selectPatternCandidates(candidates, policy);
+      for (const cand of selected) {
+        if (!seenFragments.has(cand.fragment.idx)) {
+          seenFragments.add(cand.fragment.idx);
+          patternSelected.push(cand);
+        }
+      }
+    }
+  }
+  const patternCandidateRows = patternModels.length ? patternCandidates(fragments, patternModels[0], settings.patternMinScore, report) : [];
   const scaffoldSeverity = normalizeScores(patternSelected, (candidate) => candidate.score);
   const patternSpans = patternSelected.map((candidate) => ({
     ...removalSpan(text, candidate.fragment),
@@ -978,7 +997,7 @@ export function analyze(text, settings = DEFAULT_SETTINGS, profileName = "med", 
     templateRows,
     phraseRows,
     patternRows: patternRowsResult,
-    patternModel,
+    patternModel: patternModels[0] ?? null,
     patternCandidates: patternCandidateRows,
     outputMode: settings.outputMode,
     timings,
