@@ -273,6 +273,54 @@ The UI includes a help modal (opened via the "Help & Documentation" button in th
 - **Batch mode** — multi-file processing, auto-download, localStorage history
 - **Privacy** — fully client-side, no server or telemetry
 
+## Character detection for large corpuses
+
+The `characters:` frontmatter field tells the ablation tool which proper nouns to exclude from the repetition token index. Without it, repeated character names inflate fragment similarity scores and cause false-positive removals. For a corpus of books that lack this metadata, the names must be identified and inserted before running the ablation batch.
+
+### What goes in `characters:`
+
+Not just people. Any proper noun that can repeat without penalty: character names, place names, brand names, mythological figures, historical terms, named objects, buildings, institutions. If it's a capitalized word that appears multiple times in a document and its repetition is legitimate (not scaffold noise), it belongs in the list.
+
+### The incremental stoplist process
+
+The only reliable method found for identifying these names across a large corpus (100+ files) without bleed between files:
+
+1. **Extract repeated capitalized words** from each file (2+ occurrences). These are the candidates.
+2. **Process files sequentially.** For the first file, look at every candidate word and classify it: is it a name (person, place, thing that can repeat) or a non-name (common word, pronoun, verb, adjective, interjection)?
+3. **Names go into that file's `characters:` list. Non-names go onto a shared stoplist.**
+4. **For the next file, filter out all stoplist words before even looking at the candidates.** The stoplist grows with every file, so each subsequent file has fewer candidates to inspect.
+5. **Repeat.** By file 20, most common words are already on the stoplist and only genuine proper nouns remain as candidates.
+
+This is fast because the stoplist does the heavy lifting — you never re-examine a word once it's been classified. It's accurate because a human (or LLM operator) makes the name/non-name call per word, not a heuristic. And there's no bleed between files: each file gets only the names that appear in it, while the stoplist is the only shared state.
+
+### What does NOT work
+
+- **Dictionary filtering** — proper names like "Jake", "Clara", "Adrian", "June" are in standard dictionaries, so "not in dictionary" filters them out while letting through non-names like "Sweat", "Alley", "Bullshit" that aren't in the dictionary.
+- **Common word lists (top 10k/20k)** — these include many real names (June, Adrian, Clara, Nora, Jake, Lena) while missing domain-specific non-names (Sweat, Restraint, Exhaustion, Goddamn).
+- **Automated heuristics** — regex patterns, frequency thresholds, NLP NER taggers all produce too many false positives and false negatives on prose with heavy dialogue and stylised capitalisation.
+- **Batch classification** — processing all files at once without the growing stoplist means re-examining the same common words in every file, wasting enormous time.
+
+### Scripts
+
+- `scripts/extract-name-candidates.mjs` — extracts repeated capitalized words per file, optionally filtering against a stoplist JSON file. Outputs candidates for manual classification.
+- `scripts/write-characters-frontmatter.mjs` — takes a names map (JSON: `{ "filename": ["Name1", "Name2"] }`) and inserts a `characters:` line into each file's existing YAML frontmatter.
+
+### Workflow
+
+```bash
+# 1. Extract candidates (optionally with existing stoplist)
+node scripts/extract-name-candidates.mjs <corpus-dir> [stoplist.json] > candidates.json
+
+# 2. Classify each file's candidates manually (names vs non-names)
+#    Build names-map.json: { "file.md": ["Name1", "Name2"], ... }
+
+# 3. Write frontmatter
+node scripts/write-characters-frontmatter.mjs <corpus-dir> names-map.json
+
+# 4. Run ablation batch
+python scripts/find-repetition-hotspots.py --batch <corpus-dir> --write-refloors <output-dir> --scaffold light --profiles low
+```
+
 ## License
 
 DBAD (Don't Be A Dick).

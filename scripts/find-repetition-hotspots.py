@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import os
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -935,7 +936,10 @@ def write_refloors(
     for name in profile_names:
         profile = REFLOOR_PROFILES[name]
         selected = selected_for_profile(rows, len(fragments), profile)
-        out_path = out_dir / f"{path.stem}.{name}.md"
+        if out_dir.resolve() == path.parent.resolve():
+            out_path = out_dir / f"{path.stem}.{name}.md"
+        else:
+            out_path = out_dir / f"{path.stem}.md"
         refloored = apply_profile(text, selected)
         kept_words = word_count(refloored)
         out_path.write_text(refloored, encoding="utf-8")
@@ -1291,7 +1295,7 @@ def build_batch_pattern_model(prepared_docs: list[dict]) -> dict | None:
     import time
 
     TRANCHE_TOKEN_BUDGET = 8000
-    MAX_RSS_MB = 2048
+    MAX_RSS_MB = int(os.environ.get("ABLATION_MAX_RSS_MB", "4096"))
 
     total_tokens = sum(len(f.tokens) for doc in prepared_docs for f in doc["fragments"])
     total_tranches = max(1, (total_tokens + TRANCHE_TOKEN_BUDGET - 1) // TRANCHE_TOKEN_BUDGET)
@@ -1760,7 +1764,10 @@ def run_batch(args: argparse.Namespace) -> None:
                 "total": result["metrics"]["removed_fragments"],
             },
         })
-        out_path = out_dir / f"{path.stem}.{profile_name}.scaffold-{args.scaffold}.md"
+        if out_dir.resolve() == path.parent.resolve():
+            out_path = out_dir / f"{path.stem}.{profile_name}.scaffold-{args.scaffold}.md"
+        else:
+            out_path = out_dir / f"{path.stem}.md"
         out_path.write_text(refloored, encoding="utf-8")
         m = result["metrics"]
         print(f"  -> {out_path.name}: kept {m['kept_words']}/{m['original_words']} words, "
